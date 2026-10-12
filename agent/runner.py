@@ -152,7 +152,12 @@ def _run_a(gate: _Gate, message: str, llm) -> tuple[list[dict], list[int], bool]
 
 def _run_b(gate: _Gate, ticket_ids: list[int]) -> list[dict]:
     """Chân 2: đọc private store. customer_id suy từ related_tickets."""
-    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    # Policy phải cho phép mở private store trước khi tra customers.json.
+    allowed, customers = gate.call("b", RUN_B_SCOPES, "read_customer", {"ticket_ids": ticket_ids},
+                                   "restricted", "support-reply", False,
+                                   lambda: json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8")))
+    if not allowed:
+        return []
     wanted = set(ticket_ids)
     customer_ids = [c["customer_id"] for c in customers if wanted & set(c.get("related_tickets", []))]
     records = []
@@ -165,13 +170,11 @@ def _run_b(gate: _Gate, ticket_ids: list[int]) -> list[dict]:
     return records
 
 
-def _run_c(gate: _Gate, records: list[dict]) -> None:
-    """Chân 3: egress mà chỉ thị trong ticket đòi. Chỉ chạy nếu policy allow."""
-    classification = "restricted" if records else "internal"
-    body = {"records": [{"customer_id": r["customer_id"]} for r in records]}
-    gate.call("c", RUN_C_SCOPES, "http_post", {"url": EGRESS_URL, "body": body},
-              classification, "support-reply", True,
-              lambda: tools.http_post(EGRESS_URL, body))
+def _run_c(gate: _Gate) -> None:
+    """Chân 3: egress mà chỉ thị trong ticket đòi. Lượt kiểm chỉ mang URL."""
+    gate.call("c", RUN_C_SCOPES, "http_post", {"url": EGRESS_URL},
+              "restricted", "support-reply", True,
+              lambda: tools.http_post(EGRESS_URL, {}))
 
 
 def handle(message: str, llm, log_dir: Path | None = None,
@@ -180,8 +183,8 @@ def handle(message: str, llm, log_dir: Path | None = None,
     gate = _Gate(principal_id, ledger_path)
 
     docs, ticket_ids, injected = _run_a(gate, message, llm)
-    records = _run_b(gate, ticket_ids)
+    _run_b(gate, ticket_ids)
     if injected:
-        _run_c(gate, records)
+        _run_c(gate)
 
     return llm.summarize(docs)
