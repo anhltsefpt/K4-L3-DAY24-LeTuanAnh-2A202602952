@@ -1,10 +1,12 @@
-# Compliance mapping — điền trong checkpoint 5
+# Compliance mapping
 
-| Nguồn / yêu cầu | Control đã làm | Evidence file:dòng | Giới hạn |
+Bảng này nối control trong lab với chủ đề của từng nguồn. Tôi chưa đọc toàn văn các văn bản pháp luật nên **không ghi số điều cụ thể** (ghi "chưa xác minh điều khoản"). Đây là bài lab trên dữ liệu synthetic, không phải chứng nhận tuân thủ.
+
+| Nguồn / chủ đề | Control đã làm | Evidence file:dòng | Giới hạn |
 |---|---|---|---|
-| Luật 91/2025/QH15 | | | |
-| NĐ 356/2025/NĐ-CP | | | |
-| Luật AI 134/2025/QH15 | | | |
-| OWASP ASI01, ASI03, ASI04 | | | |
-
-Chỉ ghi điều khoản cụ thể khi đã đối chiếu văn bản gốc. Mô phỏng kỹ thuật không tự chứng minh tuân thủ pháp luật.
+| [Luật 91/2025/QH15 — Bảo vệ dữ liệu cá nhân](https://vanban.chinhphu.vn/?pageid=27160&docid=214590&classid=1&typegroupid=3) (hiệu lực 01/01/2026). Chủ đề: không để lộ dữ liệu cá nhân, xử lý đúng mục đích. Chưa xác minh điều khoản. | Dữ liệu `restricted` + egress luôn bị deny; chỉ đọc hồ sơ khi principal có quyền và đúng purpose; PII bị che trước khi tóm tắt. | `agent/policy.py:78`, `agent/policy.py:85`, `agent/runner.py:149`, `reports/ledger.jsonl:24` và `:48` (http_post deny), `reports/attack-after.log` (0 byte) | Chỉ có 4 loại PII bằng regex; không có cơ chế đồng ý, quyền của chủ thể dữ liệu hay xoá dữ liệu. |
+| [NĐ 356/2025/NĐ-CP — hướng dẫn Luật BVDLCN](https://vanban.chinhphu.vn/?pageid=27160&docid=216387) (hiệu lực 01/01/2026). Chủ đề: biện pháp bảo vệ, ghi nhận hoạt động xử lý. Chưa xác minh điều khoản. | Mỗi lần xin gọi tool (allow lẫn deny) đều ghi ledger có `on_behalf_of`, `purpose`, `reason`, hash chain; ledger chỉ lưu `args_hash`, không lưu PII thô. | `agent/runner.py:121-134`, `agent/ledger.py:60`, `agent/ledger.py:70`, `reports/ledger.jsonl` (`verify()` = True) | Hash chain không phát hiện cắt đuôi hay viết lại cả file; chưa có DPIA chính thức hay hồ sơ xử lý theo mẫu của Nghị định. |
+| [Luật 134/2025/QH15 — Trí tuệ nhân tạo](https://vanban.chinhphu.vn/?pageid=27160&docid=216334&classid=1&orggroupid=1) (hiệu lực 01/03/2026). Chủ đề: quản lý rủi ro, trách nhiệm giải trình của hệ thống AI. Chưa xác minh điều khoản. | Agent không tự quyết hành động nhạy cảm: mọi tool đi qua PEP; mỗi run có `agent_id`, `run_id`, `expires_at` để truy vết. | `agent/runner.py:96-135`, `agent/policy.py:88-92`, `tests/test_obo.py:51` | Chưa phân loại mức rủi ro của hệ thống theo Luật; principal là dữ liệu giả lập, không có xác thực thật. |
+| [OWASP ASI01 — Agent Goal Hijack](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) | Trifecta split: Run A chỉ chuyển số ticket từ tên file; Run B suy khách từ `related_tickets`, không đọc chỉ thị trong ticket. | `agent/runner.py:145`, `agent/runner.py:155-167`, `tests/test_split.py:75`, `tests/test_injection.py:71`, `injection-corpus.md` | Mock nhận diện injection bằng marker; model thật có thể bị dẫn dắt theo cách khác, nhưng split vẫn không cho free text chọn khách. |
+| [OWASP ASI03 — Identity and Privilege Abuse](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) | Quyền = `allowed_tools` ∩ `agent_scopes` (∩ `parent_scopes` khi depth > 0); principal lạ, sai purpose, hết hạn đều deny. | `agent/policy.py:83-98`, `agent/runner.py:78-81`, `tests/test_obo.py:29-51` | `--as` chỉ chọn dòng trong `data/principals.json`, không chứng minh danh tính người dùng. |
+| [OWASP ASI04 — Agentic Supply Chain](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) | Gitleaks quét lịch sử và file hiện tại; hook pre-commit pin `v8.30.1`; dependency khoá bằng hash. | `.pre-commit-config.yaml:3`, `.pre-commit-config.yaml:7`, `requirements.lock:205`, `requirements.lock:209`, `reports/secrets-incident.md:4-5` | Không kiểm chữ ký package, không có SBOM; hook chỉ chặn lần lộ sau, không thu hồi được token đã lộ. |
