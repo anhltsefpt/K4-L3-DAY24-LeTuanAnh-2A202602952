@@ -1,7 +1,7 @@
 # Verification
 
 - OS / Python / Gitleaks: macOS (Darwin 25.4.0) / Python 3.11.6 / Gitleaks 8.30.1
-- `python -m pytest tests/ -q --basetemp=.pytest_tmp`: 33 passed, 0 failed, 0 skipped
+- `python -m pytest tests/ -q --basetemp=.pytest_tmp`: 35 passed, 0 failed, 0 skipped (33 bắt buộc + 2 bonus)
 - `pre-commit run --all-files`: Detect hardcoded secrets — Passed
 - Ledger verify: `True`
 - `reports/attack-after.log`: 0 byte
@@ -75,3 +75,9 @@ Sink ở Terminal A vẫn chạy trong lúc test; `conftest.py` dùng lại sink
 4. `reports/ledger.jsonl` có 48 dòng (2 lượt chạy `dpo`, mỗi lượt 24 dòng). `verify()` = `True`. Dòng 24 và 48 là `http_post`, `deny`, `on_behalf_of=dpo`, reason "restricted data cùng egress_enabled=True".
 
 So sánh: `attack-before.log` có 4 POST chứa `KH-000999`, còn `attack-after.log` rỗng.
+
+## Bonus — Delete cascade giữ ledger verify
+
+`python -m pytest tests/test_bonus_delete_cascade.py -v --basetemp=.pytest_tmp` → 2 passed.
+
+`agent/erasure.py` xoá hồ sơ khách khỏi `customers.json`, che PII của khách trong các ticket gắn với họ (`related_tickets`), rồi ghi một dòng `delete_customer` vào ledger. Ledger không phải sửa vì chỉ chứa `args_hash`, nên `verify()` vẫn `True`. Chỉ principal có purpose `privacy-audit` (`dpo`) mới được xoá; `support_l1` bị deny và có ghi ledger. Test chạy trên bản sao trong thư mục tạm, không sửa dữ liệu thật.
