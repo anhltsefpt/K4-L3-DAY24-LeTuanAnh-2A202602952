@@ -30,10 +30,33 @@ set ở tests/vn_pii_testset.jsonl):
 """
 from __future__ import annotations
 
+import re
+
+# Thứ tự = độ ưu tiên khi hai pattern trùng vùng: STK có nhãn đứng trước
+# CCCD vì STK 12 số trông giống hệt CCCD, chỉ nhãn mới phân biệt được.
+_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("EMAIL", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")),
+    ("VN_BANK_ACCOUNT", re.compile(
+        r"(?:\bSTK|s[ốo] t[àa]i kho[ảa]n|t[àa]i kho[ảa]n)\s*[:#]?\s*(?P<value>\d{8,16})(?!\d)",
+        re.IGNORECASE)),
+    ("VN_CCCD", re.compile(r"(?<!\d)\d{12}(?!\d)")),
+    ("VN_PHONE", re.compile(r"(?<!\d)0\d{2,3}[ .-]?\d{3}[ .-]?\d{3,4}(?!\d)")),
+]
+
 
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    entities: list[dict] = []
+    for pii_type, pattern in _PATTERNS:
+        for match in pattern.finditer(text):
+            group = "value" if "value" in pattern.groupindex else 0
+            start, end = match.span(group)
+            if any(start < e["end"] and e["start"] < end for e in entities):
+                continue  # vùng này đã thuộc một loại ưu tiên cao hơn
+            entities.append({"type": pii_type, "start": start, "end": end})
+    return sorted(entities, key=lambda e: e["start"])
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    for entity in sorted(detect(text), key=lambda e: e["start"], reverse=True):
+        text = text[:entity["start"]] + f"[REDACTED_{entity['type']}]" + text[entity["end"]:]
+    return text

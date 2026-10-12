@@ -59,16 +59,129 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent import ledger, pii, tools
+from agent.policy import PolicyContext, check
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+
+AGENT_ID = "lab24-agent"
+RUN_TTL = timedelta(minutes=5)
+# Agent cha giữ trần quyền; mỗi run con chỉ nhận đúng một chân trifecta.
+PARENT_SCOPES = ("search_docs", "read_customer", "http_post")
+RUN_A_SCOPES = ("search_docs",)
+RUN_B_SCOPES = ("read_customer",)
+RUN_C_SCOPES = ("http_post",)
+EGRESS_URL = f"http://{tools.ALLOWED_EGRESS_HOST}:{tools.ALLOWED_EGRESS_PORT}/reconcile"
+
+_TICKET_FILE_RE = re.compile(r"^ticket-(\d+)\.md$")
 
 
 class RunnerScaffoldPending(NotImplementedError):
     """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
 
 
+def _args_hash(args: dict) -> str:
+    payload = json.dumps(args, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class _Gate:
+    """PEP dùng chung cho mọi run con: check() -> ledger.append() -> tool."""
+
+    def __init__(self, principal_id: str, ledger_path: Path):
+        self.principal_id = principal_id
+        self.ledger_path = ledger_path
+        self.run_id = uuid.uuid4().hex
+        self.expires_at = (datetime.now(timezone.utc) + RUN_TTL).isoformat()
+
+    def call(self, run: str, scopes: tuple[str, ...], tool: str, args: dict,
+             classification: str, purpose: str, egress: bool, fn):
+        agent_id = f"{AGENT_ID}/run-{run}"
+        context = PolicyContext(
+            data_classification=classification,
+            request_purpose=purpose,
+            agent_owner=agent_id,
+            delegation_depth=1,
+            egress_enabled=egress,
+            principal_id=self.principal_id,
+            requested_tool=tool,
+            agent_scopes=scopes,
+            parent_scopes=PARENT_SCOPES,
+            expires_at=self.expires_at,
+        )
+        allow, reason = check(context)
+        ledger.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_id": agent_id,
+            "run_id": f"{self.run_id}-{run}",
+            "on_behalf_of": self.principal_id,
+            "expires_at": self.expires_at,
+            "tool": tool,
+            "args_hash": _args_hash(args),
+            "classification": classification,
+            "purpose": purpose,
+            "egress": egress,
+            "decision": "allow" if allow else "deny",
+            "reason": reason,
+        }, self.ledger_path)
+        return (True, fn()) if allow else (False, None)
+
+
+def _run_a(gate: _Gate, message: str, llm) -> tuple[list[dict], list[int], bool]:
+    """Chân 1: đọc corpus. Chỉ trả ra ticket_id số lấy từ TÊN FILE."""
+    allowed, docs = gate.call("a", RUN_A_SCOPES, "search_docs", {"query": message},
+                              "internal", "summarize-tickets", False,
+                              lambda: tools.search_docs(message))
+    if not allowed:
+        return [], [], False
+    ticket_ids = sorted({int(m.group(1)) for d in docs if (m := _TICKET_FILE_RE.match(d["id"]))})
+    # Chỉ thị injection chỉ được ghi nhận dưới dạng cờ bool; customer_id và
+    # URL trong free text không bao giờ rời Run A.
+    injected = llm.find_injection("\n\n".join(d["text"] for d in docs)) is not None
+    redacted_docs = [{"id": d["id"], "text": pii.redact(d["text"])} for d in docs]
+    return redacted_docs, ticket_ids, injected
+
+
+def _run_b(gate: _Gate, ticket_ids: list[int]) -> list[dict]:
+    """Chân 2: đọc private store. customer_id suy từ related_tickets."""
+    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    wanted = set(ticket_ids)
+    customer_ids = [c["customer_id"] for c in customers if wanted & set(c.get("related_tickets", []))]
+    records = []
+    for customer_id in customer_ids:
+        allowed, record = gate.call("b", RUN_B_SCOPES, "read_customer", {"customer_id": customer_id},
+                                    "restricted", "support-reply", False,
+                                    lambda cid=customer_id: tools.read_customer(cid))
+        if allowed:
+            records.append(record)
+    return records
+
+
+def _run_c(gate: _Gate, records: list[dict]) -> None:
+    """Chân 3: egress mà chỉ thị trong ticket đòi. Chỉ chạy nếu policy allow."""
+    classification = "restricted" if records else "internal"
+    body = {"records": [{"customer_id": r["customer_id"]} for r in records]}
+    gate.call("c", RUN_C_SCOPES, "http_post", {"url": EGRESS_URL, "body": body},
+              classification, "support-reply", True,
+              lambda: tools.http_post(EGRESS_URL, body))
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    ledger_path = (Path(log_dir) / "ledger.jsonl") if log_dir else DEFAULT_LEDGER_PATH
+    gate = _Gate(principal_id, ledger_path)
+
+    docs, ticket_ids, injected = _run_a(gate, message, llm)
+    records = _run_b(gate, ticket_ids)
+    if injected:
+        _run_c(gate, records)
+
+    return llm.summarize(docs)

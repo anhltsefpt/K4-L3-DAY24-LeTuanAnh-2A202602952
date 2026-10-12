@@ -34,7 +34,13 @@ không phải xác thực người dùng production.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+CLASSIFICATIONS = ("public", "internal", "restricted")
 
 
 @dataclass(frozen=True)
@@ -51,5 +57,46 @@ class PolicyContext:
     expires_at: str = ""
 
 
+def _load_principals() -> dict:
+    return json.loads(PRINCIPALS_FILE.read_text(encoding="utf-8"))
+
+
+def _parse_utc(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    c = context
+    if c.data_classification not in CLASSIFICATIONS:
+        return False, f"deny: data_classification {c.data_classification!r} không thuộc {CLASSIFICATIONS}"
+
+    # Rule tối thiểu, đặt trước mọi kiểm OBO: không principal nào vượt được.
+    if c.data_classification == "restricted" and c.egress_enabled:
+        return False, "deny: restricted data cùng egress_enabled=True (rule tối thiểu, áp cho mọi principal)"
+
+    principal = _load_principals().get(c.principal_id)
+    if principal is None:
+        return False, f"deny: unknown principal {c.principal_id!r}"
+
+    if c.request_purpose not in principal["purposes"]:
+        return False, f"deny: purpose {c.request_purpose!r} không thuộc purposes của {c.principal_id}"
+
+    expires = _parse_utc(c.expires_at)
+    if expires is None:
+        return False, f"deny: expires_at {c.expires_at!r} thiếu hoặc không phải ISO-8601 có timezone"
+    if expires <= datetime.now(timezone.utc):
+        return False, f"deny: run đã hết hạn lúc {c.expires_at}"
+
+    if c.requested_tool not in principal["allowed_tools"]:
+        return False, f"deny: principal {c.principal_id} không được dùng {c.requested_tool!r}"
+    if c.requested_tool not in c.agent_scopes:
+        return False, f"deny: {c.requested_tool!r} nằm ngoài agent_scopes của {c.agent_owner}"
+    if c.delegation_depth > 0 and c.requested_tool not in c.parent_scopes:
+        return False, f"deny: agent con (depth={c.delegation_depth}) xin {c.requested_tool!r} vượt parent_scopes"
+
+    return True, (f"allow: {c.principal_id} dùng {c.requested_tool} cho {c.request_purpose}, "
+                  f"{c.data_classification}, egress={c.egress_enabled}, trong scope, còn hạn")
